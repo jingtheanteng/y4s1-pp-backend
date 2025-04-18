@@ -233,6 +233,27 @@ def update_profile():
     finally:
         conn.close()
 
+@app.route('/user/<int:id>', methods=['DELETE'])
+def delete_user(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # First check if user exists
+        cr.execute('SELECT id FROM user WHERE id = ?', (id,))
+        if not cr.fetchone():
+            return {'status': False, 'message': 'User not found'}, 404
+            
+        # Delete the user
+        cr.execute('DELETE FROM user WHERE id = ?', (id,))
+        conn.commit()
+        
+        return {'status': True, 'message': 'User deleted successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 # Faculty CRUD Operations
 @app.route('/faculty', methods=['GET'])
 def get_faculties():
@@ -447,6 +468,82 @@ def delete_department(id):
     finally:
         conn.close()
 
+@app.route('/department/pin', methods=['POST'])
+def pin_department():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    department_id = data.get('department_id')
+    
+    if not user_id or not department_id:
+        return {'status': False, 'message': 'User ID and Department ID are required'}, 400
+    
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Check if pin already exists
+        cr.execute('''
+            SELECT id FROM department_pin 
+            WHERE user_id = ? AND department_id = ?
+        ''', (user_id, department_id))
+        
+        existing_pin = cr.fetchone()
+        
+        if existing_pin:
+            # Unpin the department
+            cr.execute('''
+                DELETE FROM department_pin 
+                WHERE user_id = ? AND department_id = ?
+            ''', (user_id, department_id))
+            message = 'Department unpinned successfully'
+        else:
+            # Pin the department
+            cr.execute('''
+                INSERT INTO department_pin (user_id, department_id)
+                VALUES (?, ?)
+            ''', (user_id, department_id))
+            message = 'Department pinned successfully'
+            
+        conn.commit()
+        return {'status': True, 'message': message}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/department/pinned/<int:user_id>', methods=['GET'])
+def get_pinned_departments(user_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('''
+            SELECT d.*, f.name as faculty_name 
+            FROM department d
+            JOIN department_pin dp ON d.id = dp.department_id
+            LEFT JOIN faculty f ON d.faculty_id = f.id
+            WHERE dp.user_id = ?
+        ''', (user_id,))
+        
+        departments = [{
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'faculty_id': row[3],
+            'created_at': row[4],
+            'faculty_name': row[5]
+        } for row in cr.fetchall()]
+        
+        return {
+            'status': True,
+            'data': departments,
+            'message': 'Pinned departments retrieved successfully'
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 # Category CRUD Operations
 @app.route('/category', methods=['GET'])
 def get_categories():
@@ -480,16 +577,62 @@ def create_category():
     finally:
         conn.close()
 
+@app.route('/category/<int:id>', methods=['PUT'])
+def update_category(id):
+    data = request.get_json()
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('UPDATE category SET name = ? WHERE id = ?', (data['name'], id))
+        conn.commit()
+        if cr.rowcount > 0:
+            return {'status': True, 'message': 'Category updated successfully'}
+        return {'status': False, 'message': 'Category not found'}, 404
+    except sqlite3.IntegrityError:
+        return {'status': False, 'message': 'Category name must be unique'}, 400
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/category/<int:id>', methods=['DELETE'])
+def delete_category(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Check if category is used in any posts
+        cr.execute('SELECT COUNT(*) FROM post WHERE category_id = ?', (id,))
+        if cr.fetchone()[0] > 0:
+            return {'status': False, 'message': 'Cannot delete category that is being used by posts'}, 400
+            
+        cr.execute('DELETE FROM category WHERE id = ?', (id,))
+        conn.commit()
+        if cr.rowcount > 0:
+            return {'status': True, 'message': 'Category deleted successfully'}
+        return {'status': False, 'message': 'Category not found'}, 404
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 # Post CRUD Operations
 @app.route('/post', methods=['GET'])
 def get_posts():
     conn = sqlite3.connect('data.db')
     cr = conn.cursor()
     
+    # Add optional pagination parameters
+    page = request.args.get('page', type=int)
+    limit = request.args.get('limit', type=int)
+    
     # Add filters for category_id, department_id, and owner_id
     category_id = request.args.get('category_id')
     department_id = request.args.get('department_id')
     owner_id = request.args.get('owner_id')
+    sort_by = request.args.get('sort_by', 'created_at')  # Default sort by created_at
+    sort_order = request.args.get('sort_order', 'DESC')  # Default sort order
     
     query = '''
         SELECT p.*, 
@@ -518,7 +661,24 @@ def get_posts():
         query += ' AND p.owner_id = ?'
         params.append(owner_id)
     
-    query += ' ORDER BY p.created_at DESC'
+    # Get total count before applying limit
+    count_query = f"SELECT COUNT(*) FROM ({query}) as subquery"
+    cr.execute(count_query, params)
+    total_posts = cr.fetchone()[0]
+    
+    # Add sorting
+    if sort_by == 'likes':
+        query += ' ORDER BY p.like_count'
+    else:
+        query += ' ORDER BY p.created_at'
+    
+    query += f' {sort_order}'
+    
+    # Add pagination only if both page and limit are provided
+    if page is not None and limit is not None:
+        offset = (page - 1) * limit
+        query += ' LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
     
     cr.execute(query, params)
     posts = [{
@@ -535,12 +695,25 @@ def get_posts():
         'department_name': row[10],
         'comment_count': row[11]
     } for row in cr.fetchall()]
-    conn.close()
-    return {
+    
+    response = {
         'status': True,
         'data': posts,
         'message': 'Posts retrieved successfully'
     }
+    
+    # Add pagination info only if pagination was requested
+    if page is not None and limit is not None:
+        total_pages = (total_posts + limit - 1) // limit
+        response['pagination'] = {
+            'page': page,
+            'per_page': limit,
+            'total_posts': total_posts,
+            'total_pages': total_pages
+        }
+    
+    conn.close()
+    return response
 
 @app.route('/post/<int:id>', methods=['GET'])
 def get_post(id):
@@ -631,15 +804,53 @@ def update_post(id):
 
 @app.route('/post/<int:id>/like', methods=['POST'])
 def like_post(id):
+    data = request.get_json()
+    user_id = data.get('user_id')
+    
+    if not user_id:
+        return {'status': False, 'message': 'User ID is required'}, 400
+        
     conn = sqlite3.connect('data.db')
     cr = conn.cursor()
     
     try:
-        cr.execute('UPDATE post SET like_count = like_count + 1 WHERE id = ?', (id,))
+        # Check if user has already liked the post
+        cr.execute('''
+            SELECT id FROM post_like 
+            WHERE post_id = ? AND user_id = ?
+        ''', (id, user_id))
+        
+        existing_like = cr.fetchone()
+        
+        if existing_like:
+            # Unlike the post
+            cr.execute('''
+                DELETE FROM post_like 
+                WHERE post_id = ? AND user_id = ?
+            ''', (id, user_id))
+            cr.execute('''
+                UPDATE post 
+                SET like_count = like_count - 1 
+                WHERE id = ?
+            ''', (id,))
+            message = 'Post unliked successfully'
+        else:
+            # Like the post
+            cr.execute('''
+                INSERT INTO post_like (post_id, user_id)
+                VALUES (?, ?)
+            ''', (id, user_id))
+            cr.execute('''
+                UPDATE post 
+                SET like_count = like_count + 1 
+                WHERE id = ?
+            ''', (id,))
+            message = 'Post liked successfully'
+            
         conn.commit()
-        if cr.rowcount > 0:
-            return {'status': True, 'message': 'Post liked successfully'}
-        return {'status': False, 'message': 'Post not found'}, 404
+        return {'status': True, 'message': message}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
     finally:
         conn.close()
 
@@ -661,7 +872,7 @@ def get_comments():
         query += ' WHERE c.post_id = ?'
         params.append(post_id)
     
-    query += ' ORDER BY c.created_at DESC'
+    query += ' ORDER BY c.created_at ASC'
     
     cr.execute(query, params)
     comments = [{
@@ -670,9 +881,33 @@ def get_comments():
         'like_count': row[2],
         'owner_id': row[3],
         'post_id': row[4],
-        'created_at': row[5],
-        'owner_name': row[6]
+        'parent_comment_id': row[5],
+        'created_at': row[6],
+        'owner_name': row[7],
+        'replies': []
     } for row in cr.fetchall()]
+
+    # Fetch replies for each comment
+    for comment in comments:
+        cr.execute('''
+            SELECT c.*, u.name as owner_name
+            FROM comment c
+            LEFT JOIN user u ON c.owner_id = u.id
+            WHERE c.parent_comment_id = ?
+            ORDER BY c.created_at ASC
+        ''', (comment['id'],))
+        
+        comment['replies'] = [{
+            'id': row[0],
+            'name': row[1],
+            'like_count': row[2],
+            'owner_id': row[3],
+            'post_id': row[4],
+            'parent_comment_id': row[5],
+            'created_at': row[6],
+            'owner_name': row[7]
+        } for row in cr.fetchall()]
+
     conn.close()
     return {
         'status': True,
@@ -687,28 +922,219 @@ def create_comment():
     cr = conn.cursor()
     
     try:
+        # Validate required fields
+        if not data.get('name'):
+            return {'status': False, 'message': 'Comment text is required'}, 400
+        if not data.get('owner_id'):
+            return {'status': False, 'message': 'User ID is required'}, 400
+        if not data.get('post_id'):
+            return {'status': False, 'message': 'Post ID is required'}, 400
+            
+        # If parent_comment_id is provided, verify it exists
+        parent_id = data.get('parent_comment_id')
+        if parent_id:
+            cr.execute('SELECT id FROM comment WHERE id = ?', (parent_id,))
+            if not cr.fetchone():
+                return {'status': False, 'message': 'Parent comment not found'}, 404
+
         cr.execute('''
-            INSERT INTO comment (name, owner_id, post_id)
-            VALUES (?, ?, ?)
-        ''', (data['name'], data['owner_id'], data['post_id']))
+            INSERT INTO comment (name, owner_id, post_id, parent_comment_id)
+            VALUES (?, ?, ?, ?)
+        ''', (
+            data['name'],
+            data['owner_id'],
+            data['post_id'],
+            parent_id
+        ))
         conn.commit()
-        return {'status': True, 'message': 'Comment created successfully'}
+        
+        # Get the created comment
+        comment_id = cr.lastrowid
+        cr.execute('''
+            SELECT c.*, u.name as owner_name
+            FROM comment c
+            LEFT JOIN user u ON c.owner_id = u.id
+            WHERE c.id = ?
+        ''', (comment_id,))
+        row = cr.fetchone()
+        
+        return {
+            'status': True,
+            'message': 'Comment created successfully',
+            'data': {
+                'id': row[0],
+                'name': row[1],
+                'like_count': row[2],
+                'owner_id': row[3],
+                'post_id': row[4],
+                'parent_comment_id': row[5],
+                'created_at': row[6],
+                'owner_name': row[7]
+            }
+        }
     except Exception as e:
+        print('Error creating comment:', str(e))  # Add debug logging
         return {'status': False, 'message': str(e)}, 400
     finally:
         conn.close()
 
 @app.route('/comment/<int:id>/like', methods=['POST'])
 def like_comment(id):
+    data = request.get_json()
+    user_id = data.get('user_id')
+    
+    if not user_id:
+        return {'status': False, 'message': 'User ID is required'}, 400
+        
     conn = sqlite3.connect('data.db')
     cr = conn.cursor()
     
     try:
-        cr.execute('UPDATE comment SET like_count = like_count + 1 WHERE id = ?', (id,))
+        # Check if user has already liked the comment
+        cr.execute('''
+            SELECT id FROM comment_like 
+            WHERE comment_id = ? AND user_id = ?
+        ''', (id, user_id))
+        
+        existing_like = cr.fetchone()
+        
+        if existing_like:
+            # Unlike the comment
+            cr.execute('''
+                DELETE FROM comment_like 
+                WHERE comment_id = ? AND user_id = ?
+            ''', (id, user_id))
+            cr.execute('''
+                UPDATE comment 
+                SET like_count = like_count - 1 
+                WHERE id = ?
+            ''', (id,))
+            message = 'Comment unliked successfully'
+        else:
+            # Like the comment
+            cr.execute('''
+                INSERT INTO comment_like (comment_id, user_id)
+                VALUES (?, ?)
+            ''', (id, user_id))
+            cr.execute('''
+                UPDATE comment 
+                SET like_count = like_count + 1 
+                WHERE id = ?
+            ''', (id,))
+            message = 'Comment liked successfully'
+            
         conn.commit()
-        if cr.rowcount > 0:
-            return {'status': True, 'message': 'Comment liked successfully'}
-        return {'status': False, 'message': 'Comment not found'}, 404
+        return {'status': True, 'message': message}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/comment/<int:id>', methods=['DELETE'])
+def delete_comment(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # First check if comment exists
+        cr.execute('SELECT id FROM comment WHERE id = ?', (id,))
+        if not cr.fetchone():
+            return {'status': False, 'message': 'Comment not found'}, 404
+            
+        # Delete the comment
+        cr.execute('DELETE FROM comment WHERE id = ?', (id,))
+        conn.commit()
+        
+        return {'status': True, 'message': 'Comment deleted successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/comment/<int:id>/likes', methods=['GET'])
+def check_comment_like(id):
+    user_id = request.args.get('user_id')
+    
+    if not user_id:
+        return {'status': False, 'message': 'User ID is required'}, 400
+        
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Check if user has liked the comment
+        cr.execute('''
+            SELECT id FROM comment_like 
+            WHERE comment_id = ? AND user_id = ?
+        ''', (id, user_id))
+        
+        has_liked = cr.fetchone() is not None
+        
+        return {
+            'status': True,
+            'data': {
+                'has_liked': has_liked
+            }
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/post/<int:id>', methods=['DELETE'])
+def delete_post(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # First check if post exists
+        cr.execute('SELECT id FROM post WHERE id = ?', (id,))
+        if not cr.fetchone():
+            return {'status': False, 'message': 'Post not found'}, 404
+            
+        # Delete associated comments first (due to foreign key constraint)
+        cr.execute('DELETE FROM comment WHERE post_id = ?', (id,))
+        
+        # Delete associated likes
+        cr.execute('DELETE FROM post_like WHERE post_id = ?', (id,))
+        
+        # Delete the post
+        cr.execute('DELETE FROM post WHERE id = ?', (id,))
+        conn.commit()
+        
+        return {'status': True, 'message': 'Post deleted successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/post/<int:id>/likes', methods=['GET'])
+def check_post_like(id):
+    user_id = request.args.get('user_id')
+    
+    if not user_id:
+        return {'status': False, 'message': 'User ID is required'}, 400
+        
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Check if user has liked the post
+        cr.execute('''
+            SELECT id FROM post_like 
+            WHERE post_id = ? AND user_id = ?
+        ''', (id, user_id))
+        
+        has_liked = cr.fetchone() is not None
+        
+        return {
+            'status': True,
+            'data': {
+                'has_liked': has_liked
+            }
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
     finally:
         conn.close()
 
@@ -811,6 +1237,9 @@ if __name__ == '__main__':
     # Drop existing table if it exists
     # cur.execute('DROP TABLE IF EXISTS session')
     
+    cur.execute('DROP TABLE IF EXISTS comment_like')
+    cur.execute('DROP TABLE IF EXISTS comment')
+    
     cur.execute('''
     CREATE TABLE IF NOT EXISTS user (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -864,9 +1293,11 @@ if __name__ == '__main__':
         like_count INTEGER DEFAULT 0,
         owner_id INTEGER,
         post_id INTEGER,
+        parent_comment_id INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (owner_id) REFERENCES user (id),
-        FOREIGN KEY (post_id) REFERENCES post (id)
+        FOREIGN KEY (post_id) REFERENCES post (id),
+        FOREIGN KEY (parent_comment_id) REFERENCES comment (id)
     )''')
     cur.execute('''
     CREATE TABLE IF NOT EXISTS session (
@@ -876,6 +1307,36 @@ if __name__ == '__main__':
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES user (id)
+    )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS post_like (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (post_id) REFERENCES post (id),
+        FOREIGN KEY (user_id) REFERENCES user (id),
+        UNIQUE(post_id, user_id)
+    )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS comment_like (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (comment_id) REFERENCES comment (id),
+        FOREIGN KEY (user_id) REFERENCES user (id),
+        UNIQUE(comment_id, user_id)
+    )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS department_pin (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        department_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES user (id),
+        FOREIGN KEY (department_id) REFERENCES department (id),
+        UNIQUE(user_id, department_id)
     )''')
     conn.commit()
     conn.close()
