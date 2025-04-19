@@ -68,9 +68,11 @@ def users():
         'email': row[3],
         'address': row[4],
         'phone': row[5],
-        'password': row[6]
+        'password': row[6],
+        'city': row[7],
+        'department': row[8],
+        'points': row[9] if len(row) > 9 else 0  # Add points field
     } for row in cr.fetchall()]
-    conn.commit()
     conn.close()
     return {
         'status': 'success',
@@ -97,10 +99,11 @@ def create_users():
         return {'status': False, 'message': "Password is required."}
     
     cr.execute('''
-        INSERT INTO user (id, name, bio, email, address, phone, password)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO user (id, name, bio, email, address, phone, password, city, department)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (id, data['name'], data.get('bio'), data['email'], 
-          data.get('address'), data.get('phone'), password))
+          data.get('address'), data.get('phone'), password,
+          data.get('city'), data.get('department')))
     conn.commit()
     conn.close()
     
@@ -123,8 +126,6 @@ def login_users():
         # Use parameterized query to prevent SQL injection
         cr.execute('SELECT * FROM user WHERE email = ?', (email,))
         queried_data = cr.fetchone()
-
-        print('queried_data', queried_data)
         
         # Check if user exists
         if not queried_data:
@@ -186,6 +187,8 @@ def update_profile():
         bio = data.get('bio')
         address = data.get('address')
         phone = data.get('phone')
+        city = data.get('city')
+        department = data.get('department')
         
         # First check if user exists
         cr.execute('SELECT * FROM user WHERE email = ?', (email,))
@@ -199,11 +202,13 @@ def update_profile():
             SET name = ?,
                 bio = ?,
                 address = ?,
-                phone = ?
+                phone = ?,
+                city = ?,
+                department = ?
             WHERE email = ?
         '''
         
-        cr.execute(update_query, (name, bio, address, phone, email))
+        cr.execute(update_query, (name, bio, address, phone, city, department, email))
         conn.commit()
         
         # Get updated user data
@@ -217,7 +222,9 @@ def update_profile():
                 'bio': user_data[2],
                 'email': user_data[3],
                 'address': user_data[4],
-                'phone': user_data[5]
+                'phone': user_data[5],
+                'city': user_data[7],
+                'department': user_data[8]
             }
             return {
                 'status': True,
@@ -244,11 +251,14 @@ def delete_user(id):
         if not cr.fetchone():
             return {'status': False, 'message': 'User not found'}, 404
             
+        # Delete associated notifications
+        cr.execute('DELETE FROM notification WHERE user_id = ?', (id,))
+        
         # Delete the user
         cr.execute('DELETE FROM user WHERE id = ?', (id,))
         conn.commit()
         
-        return {'status': True, 'message': 'User deleted successfully'}
+        return {'status': True, 'message': 'User and associated notifications deleted successfully'}
     except Exception as e:
         return {'status': False, 'message': str(e)}, 400
     finally:
@@ -667,7 +677,10 @@ def get_posts():
     total_posts = cr.fetchone()[0]
     
     # Add sorting
-    if sort_by == 'likes':
+    if sort_by == 'trending':
+        # Sort by combined likes and comments
+        query += ' ORDER BY (p.like_count + comment_count)'
+    elif sort_by == 'likes':
         query += ' ORDER BY p.like_count'
     else:
         query += ' ORDER BY p.created_at'
@@ -759,6 +772,15 @@ def create_post():
     cr = conn.cursor()
     
     try:
+        # First check if user exists and get current points
+        cr.execute('SELECT points FROM user WHERE id = ?', (data['owner_id'],))
+        user_result = cr.fetchone()
+        if not user_result:
+            return {'status': False, 'message': 'User not found'}, 404
+            
+        current_points = user_result[0] if user_result[0] is not None else 0
+        
+        # Insert the post
         cr.execute('''
             INSERT INTO post (name, description, department_id, category_id, owner_id)
             VALUES (?, ?, ?, ?, ?)
@@ -769,9 +791,28 @@ def create_post():
             data.get('category_id'),
             data['owner_id']
         ))
+        
+        # Update user points (add 5 points)
+        new_points = current_points + 5
+        cr.execute('''
+            UPDATE user 
+            SET points = ? 
+            WHERE id = ?
+        ''', (new_points, data['owner_id']))
+        
+        # Verify points were updated
+        cr.execute('SELECT points FROM user WHERE id = ?', (data['owner_id'],))
+        updated_points = cr.fetchone()[0]
+        print(f"Updated points for user {data['owner_id']}: {updated_points}")
+        
         conn.commit()
-        return {'status': True, 'message': 'Post created successfully'}
+        return {
+            'status': True, 
+            'message': 'Post created successfully',
+            'points': updated_points
+        }
     except Exception as e:
+        print('Error in create_post:', str(e))
         return {'status': False, 'message': str(e)}, 400
     finally:
         conn.close()
@@ -937,6 +978,12 @@ def create_comment():
             if not cr.fetchone():
                 return {'status': False, 'message': 'Parent comment not found'}, 404
 
+        # Get post owner's ID
+        cr.execute('SELECT owner_id FROM post WHERE id = ?', (data['post_id'],))
+        post_owner = cr.fetchone()
+        if not post_owner:
+            return {'status': False, 'message': 'Post not found'}, 404
+
         cr.execute('''
             INSERT INTO comment (name, owner_id, post_id, parent_comment_id)
             VALUES (?, ?, ?, ?)
@@ -946,10 +993,38 @@ def create_comment():
             data['post_id'],
             parent_id
         ))
+        
+        # Add 1 point for creating a comment
+        cr.execute('''
+            UPDATE user 
+            SET points = points + 1 
+            WHERE id = ?
+        ''', (data['owner_id'],))
+        
+        # Get the created comment ID
+        comment_id = cr.lastrowid
+
+        # Create notification for post owner if commenter is not the post owner
+        if post_owner[0] != data['owner_id']:
+            cr.execute('''
+                INSERT INTO notification (user_id, post_id, comment_id, commenter_id)
+                VALUES (?, ?, ?, ?)
+            ''', (post_owner[0], data['post_id'], comment_id, data['owner_id']))
+        
+        # If this is a reply to a comment, create notification for the original comment owner
+        if parent_id:
+            # Get the original comment owner's ID
+            cr.execute('SELECT owner_id FROM comment WHERE id = ?', (parent_id,))
+            original_comment_owner = cr.fetchone()
+            if original_comment_owner and original_comment_owner[0] != data['owner_id']:
+                cr.execute('''
+                    INSERT INTO notification (user_id, post_id, comment_id, commenter_id)
+                    VALUES (?, ?, ?, ?)
+                ''', (original_comment_owner[0], data['post_id'], comment_id, data['owner_id']))
+        
         conn.commit()
         
         # Get the created comment
-        comment_id = cr.lastrowid
         cr.execute('''
             SELECT c.*, u.name as owner_name
             FROM comment c
@@ -1230,16 +1305,122 @@ def validate_session():
     finally:
         conn.close()
 
+@app.route('/department/popular', methods=['GET'])
+def get_popular_departments():
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Get departments with their post counts, ordered by post count
+        cr.execute('''
+            SELECT d.*, f.name as faculty_name, 
+                   COUNT(p.id) as post_count
+            FROM department d
+            LEFT JOIN faculty f ON d.faculty_id = f.id
+            LEFT JOIN post p ON d.id = p.department_id
+            GROUP BY d.id
+            ORDER BY post_count DESC
+            LIMIT 5
+        ''')
+        
+        departments = [{
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'faculty_id': row[3],
+            'created_at': row[4],
+            'faculty_name': row[5],
+            'post_count': row[6]
+        } for row in cr.fetchall()]
+        
+        return {
+            'status': True,
+            'data': departments,
+            'message': 'Popular departments retrieved successfully'
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/notifications/<int:user_id>', methods=['GET'])
+def get_notifications(user_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Get all notifications for the user
+        cr.execute('''
+            SELECT n.*, 
+                   u.name as commenter_name,
+                   p.name as post_name,
+                   c.name as comment_text,
+                   c.parent_comment_id as is_reply
+            FROM notification n
+            LEFT JOIN user u ON n.commenter_id = u.id
+            LEFT JOIN post p ON n.post_id = p.id
+            LEFT JOIN comment c ON n.comment_id = c.id
+            WHERE n.user_id = ?
+            ORDER BY n.created_at DESC
+        ''', (user_id,))
+        
+        notifications = [{
+            'id': row[0],
+            'post_id': row[2],
+            'comment_id': row[3],
+            'commenter_id': row[4],
+            'is_read': row[5],
+            'created_at': row[6],
+            'commenter_name': row[7],
+            'post_name': row[8],
+            'comment_text': row[9],
+            'is_reply': row[10] is not None
+        } for row in cr.fetchall()]
+        
+        return {
+            'status': True,
+            'data': notifications,
+            'message': 'Notifications retrieved successfully'
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/notifications/<int:notification_id>/read', methods=['PUT'])
+def mark_notification_read(notification_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('''
+            UPDATE notification 
+            SET is_read = TRUE 
+            WHERE id = ?
+        ''', (notification_id,))
+        
+        conn.commit()
+        
+        if cr.rowcount > 0:
+            return {'status': True, 'message': 'Notification marked as read'}
+        return {'status': False, 'message': 'Notification not found'}, 404
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
-    
+
     # Drop existing table if it exists
     # cur.execute('DROP TABLE IF EXISTS session')
     
     cur.execute('DROP TABLE IF EXISTS comment_like')
     cur.execute('DROP TABLE IF EXISTS comment')
     
+    
+    # Create tables if they don't exist
     cur.execute('''
     CREATE TABLE IF NOT EXISTS user (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1248,7 +1429,10 @@ if __name__ == '__main__':
         email TEXT,
         address TEXT,
         phone TEXT,
-        password TEXT
+        password TEXT,
+        city TEXT,
+        department TEXT,
+        points INTEGER DEFAULT 0
     )''')
     cur.execute('''
     CREATE TABLE IF NOT EXISTS faculty (
@@ -1338,6 +1522,21 @@ if __name__ == '__main__':
         FOREIGN KEY (department_id) REFERENCES department (id),
         UNIQUE(user_id, department_id)
     )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS notification (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        post_id INTEGER NOT NULL,
+        comment_id INTEGER NOT NULL,
+        commenter_id INTEGER NOT NULL,
+        is_read BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES user (id),
+        FOREIGN KEY (post_id) REFERENCES post (id),
+        FOREIGN KEY (comment_id) REFERENCES comment (id),
+        FOREIGN KEY (commenter_id) REFERENCES user (id)
+    )''')
+    
     conn.commit()
     conn.close()
     app.run(host='0.0.0.0', port=5001, debug=True)
