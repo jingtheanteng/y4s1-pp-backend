@@ -1412,19 +1412,153 @@ def mark_notification_read(notification_id):
         conn.close()
 
 @app.route('/notifications/<int:user_id>/clear', methods=['DELETE'])
-def clear_notifications(user_id):
+def clear_all_notifications(user_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Delete all notifications for the user
+        cr.execute('DELETE FROM notification WHERE user_id = ?', (user_id,))
+        conn.commit()
+        
+        return {'status': True, 'message': 'All notifications cleared successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/reports', methods=['GET'])
+def get_reports():
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Get all reports with related information
+        cr.execute('''
+            SELECT r.*,
+                   u1.name as reporter_name,
+                   CASE 
+                       WHEN r.type = 'post' THEN p.owner_id
+                       WHEN r.type = 'comment' THEN c.owner_id
+                   END as content_owner_id,
+                   CASE 
+                       WHEN r.type = 'post' THEN u2.name
+                       WHEN r.type = 'comment' THEN u3.name
+                   END as content_owner_name,
+                   CASE 
+                       WHEN r.type = 'post' THEN p.name
+                       WHEN r.type = 'comment' THEN c.name
+                   END as content,
+                   p.name as post_name
+            FROM report r
+            LEFT JOIN user u1 ON r.reporter_id = u1.id
+            LEFT JOIN post p ON r.post_id = p.id
+            LEFT JOIN comment c ON r.comment_id = c.id
+            LEFT JOIN user u2 ON p.owner_id = u2.id
+            LEFT JOIN user u3 ON c.owner_id = u3.id
+            ORDER BY r.created_at DESC
+        ''')
+        
+        reports = [{
+            'id': row[0],
+            'type': row[1],
+            'reason': row[2],
+            'description': row[3],
+            'post_id': row[4],
+            'comment_id': row[5],
+            'reporter_id': row[6],
+            'status': row[7],
+            'created_at': row[8],
+            'reporter': row[9],
+            'content_owner_id': row[10],
+            'content_owner': row[11],
+            'content': row[12],
+            'post_name': row[13]
+        } for row in cr.fetchall()]
+        
+        return {
+            'status': True,
+            'data': reports,
+            'message': 'Reports retrieved successfully'
+        }
+    except Exception as e:
+        print('Error fetching reports:', str(e))  # Add debug logging
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/report', methods=['POST'])
+def create_report():
+    data = request.get_json()
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Validate required fields
+        required_fields = ['type', 'reason', 'reporter_id']
+        for field in required_fields:
+            if not data.get(field):
+                return {'status': False, 'message': f'{field} is required'}, 400
+
+        cr.execute('''
+            INSERT INTO report (type, reason, description, post_id, comment_id, reporter_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            data['type'],
+            data['reason'],
+            data.get('description'),
+            data.get('post_id'),
+            data.get('comment_id'),
+            data['reporter_id']
+        ))
+        
+        conn.commit()
+        return {'status': True, 'message': 'Report created successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/report/<int:id>/status', methods=['PUT'])
+def update_report_status(id):
+    data = request.get_json()
+    new_status = data.get('status')
+    
+    if not new_status or new_status not in ['pending', 'resolved', 'rejected']:
+        return {'status': False, 'message': 'Invalid status'}, 400
+        
     conn = sqlite3.connect('data.db')
     cr = conn.cursor()
     
     try:
         cr.execute('''
-            DELETE FROM notification 
-            WHERE user_id = ?
-        ''', (user_id,))
+            UPDATE report 
+            SET status = ? 
+            WHERE id = ?
+        ''', (new_status, id))
         
         conn.commit()
         
-        return {'status': True, 'message': 'All notifications cleared successfully'}
+        if cr.rowcount > 0:
+            return {'status': True, 'message': 'Report status updated successfully'}
+        return {'status': False, 'message': 'Report not found'}, 404
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/report/<int:id>', methods=['DELETE'])
+def delete_report(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('DELETE FROM report WHERE id = ?', (id,))
+        conn.commit()
+        
+        if cr.rowcount > 0:
+            return {'status': True, 'message': 'Report deleted successfully'}
+        return {'status': False, 'message': 'Report not found'}, 404
     except Exception as e:
         return {'status': False, 'message': str(e)}, 400
     finally:
@@ -1434,12 +1568,22 @@ if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
 
-    # Drop existing table if it exists
-    # cur.execute('DROP TABLE IF EXISTS session')
+    # Drop the report table to recreate it with the correct schema
+    #cur.execute('DROP TABLE IF EXISTS report')
     
-    # Remove these lines to prevent data loss
-    # cur.execute('DROP TABLE IF EXISTS comment_like')
-    # cur.execute('DROP TABLE IF EXISTS comment')
+    # Drop all tables (commented out)
+    #cur.execute('DROP TABLE IF EXISTS report')
+    #cur.execute('DROP TABLE IF EXISTS notification')
+    #cur.execute('DROP TABLE IF EXISTS department_pin')
+    #cur.execute('DROP TABLE IF EXISTS comment_like')
+    #cur.execute('DROP TABLE IF EXISTS post_like')
+    #cur.execute('DROP TABLE IF EXISTS session')
+    #cur.execute('DROP TABLE IF EXISTS comment')
+    #cur.execute('DROP TABLE IF EXISTS post')
+    #cur.execute('DROP TABLE IF EXISTS category')
+    #cur.execute('DROP TABLE IF EXISTS department')
+    #cur.execute('DROP TABLE IF EXISTS faculty')
+    #cur.execute('DROP TABLE IF EXISTS user')
     
     # Create tables if they don't exist
     cur.execute('''
@@ -1556,6 +1700,21 @@ if __name__ == '__main__':
         FOREIGN KEY (post_id) REFERENCES post (id),
         FOREIGN KEY (comment_id) REFERENCES comment (id),
         FOREIGN KEY (commenter_id) REFERENCES user (id)
+    )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS report (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        description TEXT,
+        post_id INTEGER,
+        comment_id INTEGER,
+        reporter_id INTEGER NOT NULL,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (post_id) REFERENCES post (id),
+        FOREIGN KEY (comment_id) REFERENCES comment (id),
+        FOREIGN KEY (reporter_id) REFERENCES user (id)
     )''')
     
     conn.commit()
