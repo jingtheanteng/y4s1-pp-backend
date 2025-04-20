@@ -126,6 +126,8 @@ def login_users():
         # Use parameterized query to prevent SQL injection
         cr.execute('SELECT * FROM user WHERE email = ?', (email,))
         queried_data = cr.fetchone()
+
+        print('queried_data', queried_data)
         
         # Check if user exists
         if not queried_data:
@@ -258,7 +260,7 @@ def delete_user(id):
         cr.execute('DELETE FROM user WHERE id = ?', (id,))
         conn.commit()
         
-        return {'status': True, 'message': 'User and associated notifications deleted successfully'}
+        return {'status': True, 'message': 'User deleted successfully'}
     except Exception as e:
         return {'status': False, 'message': str(e)}, 400
     finally:
@@ -1416,9 +1418,9 @@ if __name__ == '__main__':
     # Drop existing table if it exists
     # cur.execute('DROP TABLE IF EXISTS session')
     
-    cur.execute('DROP TABLE IF EXISTS comment_like')
-    cur.execute('DROP TABLE IF EXISTS comment')
-    
+    # Remove these lines to prevent data loss
+    # cur.execute('DROP TABLE IF EXISTS comment_like')
+    # cur.execute('DROP TABLE IF EXISTS comment')
     
     # Create tables if they don't exist
     cur.execute('''
