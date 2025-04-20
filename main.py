@@ -1411,6 +1411,25 @@ def mark_notification_read(notification_id):
     finally:
         conn.close()
 
+@app.route('/notifications/<int:user_id>/clear', methods=['DELETE'])
+def clear_notifications(user_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('''
+            DELETE FROM notification 
+            WHERE user_id = ?
+        ''', (user_id,))
+        
+        conn.commit()
+        
+        return {'status': True, 'message': 'All notifications cleared successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
