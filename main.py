@@ -71,7 +71,8 @@ def users():
         'password': row[6],
         'city': row[7],
         'department': row[8],
-        'points': row[9] if len(row) > 9 else 0  # Add points field
+        'points': row[9] if len(row) > 9 else 0,  # Add points field
+        'banned': row[10] if len(row) > 10 else False  # Add banned field
     } for row in cr.fetchall()]
     conn.close()
     return {
@@ -133,6 +134,10 @@ def login_users():
         if not queried_data:
             return {'status': False, 'message': "Invalid email or password"}, 401
         
+        # Check if user is banned
+        if queried_data[10]:  # banned field is at index 10
+            return {'status': False, 'message': "This account has been banned"}, 403
+        
         # Verify password directly
         stored_password = queried_data[6]  # Assuming password is at index 6
         
@@ -146,7 +151,8 @@ def login_users():
             'bio': queried_data[2],
             'email': queried_data[3],
             'address': queried_data[4],
-            'phone': queried_data[5]
+            'phone': queried_data[5],
+            'banned': queried_data[10]
         }
         
         # Create a session
@@ -226,7 +232,8 @@ def update_profile():
                 'address': user_data[4],
                 'phone': user_data[5],
                 'city': user_data[7],
-                'department': user_data[8]
+                'department': user_data[8],
+                'banned': user_data[10]
             }
             return {
                 'status': True,
@@ -1274,11 +1281,12 @@ def validate_session():
     cr = conn.cursor()
     
     try:
-        # Check if session exists
+        # Check if session exists and get user info
         cr.execute('''
-            SELECT id, user_id, created_at, expired_at 
-            FROM session 
-            WHERE token = ?
+            SELECT s.id, s.user_id, s.created_at, s.expired_at, u.banned
+            FROM session s
+            JOIN user u ON s.user_id = u.id
+            WHERE s.token = ?
         ''', (token,))
         
         session = cr.fetchone()
@@ -1293,11 +1301,28 @@ def validate_session():
         # Check if session is expired
         is_valid = now < expired_at
         
+        # Check if user is banned
+        is_banned = session[4]
+        
+        if is_banned:
+            return {
+                'status': False,
+                'message': 'This account has been banned',
+                'data': {
+                    'valid': False,
+                    'expired': False,
+                    'banned': True,
+                    'user_id': session[1],
+                    'expired_at': session[3]
+                }
+            }
+        
         return {
             'status': True,
             'data': {
                 'valid': is_valid,
                 'expired': not is_valid,
+                'banned': False,
                 'user_id': session[1],
                 'expired_at': session[3]
             }
@@ -1620,6 +1645,48 @@ def get_statistics():
     finally:
         conn.close()
 
+@app.route('/user/ban/<int:id>', methods=['POST'])
+def ban_user(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # First check if user exists
+        cr.execute('SELECT id FROM user WHERE id = ?', (id,))
+        if not cr.fetchone():
+            return {'status': False, 'message': 'User not found'}, 404
+            
+        # Ban the user
+        cr.execute('UPDATE user SET banned = TRUE WHERE id = ?', (id,))
+        conn.commit()
+        
+        return {'status': True, 'message': 'User banned successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/user/unban/<int:id>', methods=['POST'])
+def unban_user(id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # First check if user exists
+        cr.execute('SELECT id FROM user WHERE id = ?', (id,))
+        if not cr.fetchone():
+            return {'status': False, 'message': 'User not found'}, 404
+            
+        # Unban the user
+        cr.execute('UPDATE user SET banned = FALSE WHERE id = ?', (id,))
+        conn.commit()
+        
+        return {'status': True, 'message': 'User unbanned successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
@@ -1653,7 +1720,8 @@ if __name__ == '__main__':
         password TEXT,
         city TEXT,
         department TEXT,
-        points INTEGER DEFAULT 0
+        points INTEGER DEFAULT 0,
+        banned BOOLEAN DEFAULT FALSE
     )''')
     cur.execute('''
     CREATE TABLE IF NOT EXISTS faculty (
