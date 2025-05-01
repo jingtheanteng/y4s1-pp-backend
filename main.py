@@ -1687,6 +1687,55 @@ def unban_user(id):
     finally:
         conn.close()
 
+@app.route('/search', methods=['GET'])
+def search_posts():
+    query = request.args.get('q', '')
+    if not query:
+        return {'status': True, 'data': [], 'message': 'No search query provided'}
+
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Search in posts by title and description
+        cr.execute('''
+            SELECT p.*, 
+                   u.name as owner_name,
+                   c.name as category_name,
+                   d.name as department_name
+            FROM post p
+            LEFT JOIN user u ON p.owner_id = u.id
+            LEFT JOIN category c ON p.category_id = c.id
+            LEFT JOIN department d ON p.department_id = d.id
+            WHERE p.name LIKE ? OR p.description LIKE ?
+            ORDER BY p.created_at DESC
+            LIMIT 10
+        ''', (f'%{query}%', f'%{query}%'))
+        
+        posts = [{
+            'id': row[0],
+            'name': row[1],
+            'description': row[2],
+            'department_id': row[3],
+            'category_id': row[4],
+            'owner_id': row[5],
+            'like_count': row[6],
+            'created_at': row[7],
+            'owner_name': row[8],
+            'category_name': row[9],
+            'department_name': row[10]
+        } for row in cr.fetchall()]
+        
+        return {
+            'status': True,
+            'data': posts,
+            'message': 'Search results retrieved successfully'
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
