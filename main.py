@@ -1564,6 +1564,62 @@ def delete_report(id):
     finally:
         conn.close()
 
+@app.route('/admin/statistics', methods=['GET'])
+def get_statistics():
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Get time filter from query params
+        time_filter = request.args.get('time_filter', 'all')  # all, day, week, month, year
+        
+        # Base query for time filtering
+        time_condition = ""
+        if time_filter == 'day':
+            time_condition = "AND created_at >= datetime('now', '-1 day')"
+        elif time_filter == 'week':
+            time_condition = "AND created_at >= datetime('now', '-7 days')"
+        elif time_filter == 'month':
+            time_condition = "AND created_at >= datetime('now', '-30 days')"
+        elif time_filter == 'year':
+            time_condition = "AND created_at >= datetime('now', '-365 days')"
+        
+        # Get total users
+        cr.execute(f'SELECT COUNT(*) FROM user {time_condition}')
+        total_users = cr.fetchone()[0]
+        
+        # Get total posts
+        cr.execute(f'SELECT COUNT(*) FROM post {time_condition}')
+        total_posts = cr.fetchone()[0]
+        
+        # Get total reports
+        cr.execute(f'SELECT COUNT(*) FROM report {time_condition}')
+        total_reports = cr.fetchone()[0]
+        
+        # Get reports by status
+        cr.execute(f'''
+            SELECT status, COUNT(*) as count 
+            FROM report 
+            {time_condition}
+            GROUP BY status
+        ''')
+        reports_by_status = {row[0]: row[1] for row in cr.fetchall()}
+        
+        return {
+            'status': True,
+            'data': {
+                'total_users': total_users,
+                'total_posts': total_posts,
+                'total_reports': total_reports,
+                'reports_by_status': reports_by_status
+            },
+            'message': 'Statistics retrieved successfully'
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
