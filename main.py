@@ -71,8 +71,9 @@ def users():
         'password': row[6],
         'city': row[7],
         'department': row[8],
-        'points': row[9] if len(row) > 9 else 0,  # Add points field
-        'banned': row[10] if len(row) > 10 else False  # Add banned field
+        'points': row[9] if len(row) > 9 else 0,
+        'banned': row[10] if len(row) > 10 else False,
+        'profile_picture': row[11] if len(row) > 11 else None  # Add profile picture field
     } for row in cr.fetchall()]
     conn.close()
     return {
@@ -197,6 +198,7 @@ def update_profile():
         phone = data.get('phone')
         city = data.get('city')
         department = data.get('department')
+        profile_picture = data.get('profile_picture')  # Add profile picture field
         
         # First check if user exists
         cr.execute('SELECT * FROM user WHERE email = ?', (email,))
@@ -212,11 +214,12 @@ def update_profile():
                 address = ?,
                 phone = ?,
                 city = ?,
-                department = ?
+                department = ?,
+                profile_picture = ?
             WHERE email = ?
         '''
         
-        cr.execute(update_query, (name, bio, address, phone, city, department, email))
+        cr.execute(update_query, (name, bio, address, phone, city, department, profile_picture, email))
         conn.commit()
         
         # Get updated user data
@@ -233,7 +236,8 @@ def update_profile():
                 'phone': user_data[5],
                 'city': user_data[7],
                 'department': user_data[8],
-                'banned': user_data[10]
+                'banned': user_data[10],
+                'profile_picture': user_data[11] if len(user_data) > 11 else None  # Add profile picture to response
             }
             return {
                 'status': True,
@@ -656,6 +660,7 @@ def get_posts():
     query = '''
         SELECT p.*, 
                u.name as owner_name,
+               u.profile_picture as profile_picture,
                c.name as category_name,
                d.name as department_name,
                (SELECT COUNT(*) FROM comment WHERE post_id = p.id) as comment_count
@@ -713,9 +718,10 @@ def get_posts():
         'like_count': row[6],
         'created_at': row[7],
         'owner_name': row[8],
-        'category_name': row[9],
-        'department_name': row[10],
-        'comment_count': row[11]
+        'profile_picture': row[9],
+        'category_name': row[10],
+        'department_name': row[11],
+        'comment_count': row[12]
     } for row in cr.fetchall()]
     
     response = {
@@ -744,6 +750,7 @@ def get_post(id):
     cr.execute('''
         SELECT p.*, 
                u.name as owner_name,
+               u.profile_picture as profile_picture,
                c.name as category_name,
                d.name as department_name,
                (SELECT COUNT(*) FROM comment WHERE post_id = p.id) as comment_count
@@ -767,9 +774,10 @@ def get_post(id):
             'like_count': row[6],
             'created_at': row[7],
             'owner_name': row[8],
-            'category_name': row[9],
-            'department_name': row[10],
-            'comment_count': row[11]
+            'profile_picture': row[9],
+            'category_name': row[10],
+            'department_name': row[11],
+            'comment_count': row[12]
         }
         return {'status': True, 'data': post}
     return {'status': False, 'message': 'Post not found'}, 404
@@ -912,7 +920,7 @@ def get_comments():
     cr = conn.cursor()
     
     query = '''
-        SELECT c.*, u.name as owner_name
+        SELECT c.*, u.name as owner_name, u.profile_picture as profile_picture
         FROM comment c
         LEFT JOIN user u ON c.owner_id = u.id
     '''
@@ -934,13 +942,14 @@ def get_comments():
         'parent_comment_id': row[5],
         'created_at': row[6],
         'owner_name': row[7],
+        'profile_picture': row[8],
         'replies': []
     } for row in cr.fetchall()]
 
     # Fetch replies for each comment
     for comment in comments:
         cr.execute('''
-            SELECT c.*, u.name as owner_name
+            SELECT c.*, u.name as owner_name, u.profile_picture as profile_picture
             FROM comment c
             LEFT JOIN user u ON c.owner_id = u.id
             WHERE c.parent_comment_id = ?
@@ -955,7 +964,8 @@ def get_comments():
             'post_id': row[4],
             'parent_comment_id': row[5],
             'created_at': row[6],
-            'owner_name': row[7]
+            'owner_name': row[7],
+            'profile_picture': row[8]
         } for row in cr.fetchall()]
 
     conn.close()
@@ -1035,7 +1045,7 @@ def create_comment():
         
         # Get the created comment
         cr.execute('''
-            SELECT c.*, u.name as owner_name
+            SELECT c.*, u.name as owner_name, u.profile_picture as profile_picture
             FROM comment c
             LEFT JOIN user u ON c.owner_id = u.id
             WHERE c.id = ?
@@ -1053,7 +1063,8 @@ def create_comment():
                 'post_id': row[4],
                 'parent_comment_id': row[5],
                 'created_at': row[6],
-                'owner_name': row[7]
+                'owner_name': row[7],
+                'profile_picture': row[8]
             }
         }
     except Exception as e:
@@ -1770,7 +1781,8 @@ if __name__ == '__main__':
         city TEXT,
         department TEXT,
         points INTEGER DEFAULT 0,
-        banned BOOLEAN DEFAULT FALSE
+        banned BOOLEAN DEFAULT FALSE,
+        profile_picture TEXT
     )''')
     cur.execute('''
     CREATE TABLE IF NOT EXISTS faculty (
