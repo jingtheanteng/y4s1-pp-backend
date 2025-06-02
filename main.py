@@ -73,7 +73,8 @@ def users():
         'department': row[8],
         'points': row[9] if len(row) > 9 else 0,
         'banned': row[10] if len(row) > 10 else False,
-        'profile_picture': row[11] if len(row) > 11 else None  # Add profile picture field
+        'profile_picture': row[11] if len(row) > 11 else None,
+        'admin': row[12] if len(row) > 12 else False  # Add admin field
     } for row in cr.fetchall()]
     conn.close()
     return {
@@ -153,7 +154,8 @@ def login_users():
             'email': queried_data[3],
             'address': queried_data[4],
             'phone': queried_data[5],
-            'banned': queried_data[10]
+            'banned': queried_data[10],
+            'admin': queried_data[12] if len(queried_data) > 12 else False  # Add admin field
         }
         
         # Create a session
@@ -199,6 +201,7 @@ def update_profile():
         city = data.get('city')
         department = data.get('department')
         profile_picture = data.get('profile_picture')  # Add profile picture field
+        admin = data.get('admin')
         
         # First check if user exists
         cr.execute('SELECT * FROM user WHERE email = ?', (email,))
@@ -215,11 +218,12 @@ def update_profile():
                 phone = ?,
                 city = ?,
                 department = ?,
-                profile_picture = ?
+                profile_picture = ?,
+                admin = ?
             WHERE email = ?
         '''
         
-        cr.execute(update_query, (name, bio, address, phone, city, department, profile_picture, email))
+        cr.execute(update_query, (name, bio, address, phone, city, department, profile_picture, admin, email))
         conn.commit()
         
         # Get updated user data
@@ -237,7 +241,8 @@ def update_profile():
                 'city': user_data[7],
                 'department': user_data[8],
                 'banned': user_data[10],
-                'profile_picture': user_data[11] if len(user_data) > 11 else None  # Add profile picture to response
+                'profile_picture': user_data[11] if len(user_data) > 11 else None,
+                'admin': user_data[12] if len(user_data) > 12 else False  # Add profile picture to response
             }
             return {
                 'status': True,
@@ -747,23 +752,44 @@ def get_posts():
 def get_post(id):
     conn = sqlite3.connect('data.db')
     cr = conn.cursor()
-    cr.execute('''
-        SELECT p.*, 
-               u.name as owner_name,
-               u.profile_picture as profile_picture,
-               c.name as category_name,
-               d.name as department_name,
-               (SELECT COUNT(*) FROM comment WHERE post_id = p.id) as comment_count
-        FROM post p
-        LEFT JOIN user u ON p.owner_id = u.id
-        LEFT JOIN category c ON p.category_id = c.id
-        LEFT JOIN department d ON p.department_id = d.id
-        WHERE p.id = ?
-    ''', (id,))
-    row = cr.fetchone()
-    conn.close()
     
-    if row:
+    try:
+        # Get post information
+        cr.execute('''
+            SELECT p.*, 
+                   u.name as owner_name,
+                   u.profile_picture as profile_picture,
+                   c.name as category_name,
+                   d.name as department_name,
+                   (SELECT COUNT(*) FROM comment WHERE post_id = p.id) as comment_count
+            FROM post p
+            LEFT JOIN user u ON p.owner_id = u.id
+            LEFT JOIN category c ON p.category_id = c.id
+            LEFT JOIN department d ON p.department_id = d.id
+            WHERE p.id = ?
+        ''', (id,))
+        row = cr.fetchone()
+        
+        if not row:
+            return {'status': False, 'message': 'Post not found'}, 404
+            
+        # Get attachments for the post
+        cr.execute('''
+            SELECT id, file_name, file_path, file_type, file_size, created_at
+            FROM attachment 
+            WHERE post_id = ?
+            ORDER BY created_at DESC
+        ''', (id,))
+        
+        attachments = [{
+            'id': row[0],
+            'file_name': row[1],
+            'file_path': row[2],
+            'file_type': row[3],
+            'file_size': row[4],
+            'created_at': row[5]
+        } for row in cr.fetchall()]
+        
         post = {
             'id': row[0],
             'name': row[1],
@@ -777,62 +803,116 @@ def get_post(id):
             'profile_picture': row[9],
             'category_name': row[10],
             'department_name': row[11],
-            'comment_count': row[12]
+            'comment_count': row[12],
+            'attachments': attachments  # Add attachments to the response
         }
+        
         return {'status': True, 'data': post}
-    return {'status': False, 'message': 'Post not found'}, 404
-
-@app.route('/post', methods=['POST'])
-def create_post():
-    data = request.get_json()
-    conn = sqlite3.connect('data.db')
-    cr = conn.cursor()
-    
-    try:
-        # First check if user exists and get current points
-        cr.execute('SELECT points FROM user WHERE id = ?', (data['owner_id'],))
-        user_result = cr.fetchone()
-        if not user_result:
-            return {'status': False, 'message': 'User not found'}, 404
-            
-        current_points = user_result[0] if user_result[0] is not None else 0
-        
-        # Insert the post
-        cr.execute('''
-            INSERT INTO post (name, description, department_id, category_id, owner_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            data['name'],
-            data.get('description'),
-            data.get('department_id'),
-            data.get('category_id'),
-            data['owner_id']
-        ))
-        
-        # Update user points (add 5 points)
-        new_points = current_points + 5
-        cr.execute('''
-            UPDATE user 
-            SET points = ? 
-            WHERE id = ?
-        ''', (new_points, data['owner_id']))
-        
-        # Verify points were updated
-        cr.execute('SELECT points FROM user WHERE id = ?', (data['owner_id'],))
-        updated_points = cr.fetchone()[0]
-        print(f"Updated points for user {data['owner_id']}: {updated_points}")
-        
-        conn.commit()
-        return {
-            'status': True, 
-            'message': 'Post created successfully',
-            'points': updated_points
-        }
     except Exception as e:
-        print('Error in create_post:', str(e))
+        print('Error in get_post:', str(e))
         return {'status': False, 'message': str(e)}, 400
     finally:
         conn.close()
+
+@app.route('/post', methods=['POST'])
+def create_post():
+    try:
+        # Get form data
+        name = request.form.get('name')
+        description = request.form.get('description')
+        department_id = request.form.get('department_id')
+        category_id = request.form.get('category_id')
+        owner_id = request.form.get('owner_id')
+        
+        # Validate required fields
+        if not all([name, owner_id]):
+            return {'status': False, 'message': 'Name and owner_id are required'}, 400
+        
+        conn = sqlite3.connect('data.db')
+        cr = conn.cursor()
+        
+        try:
+            # First check if user exists and get current points
+            cr.execute('SELECT points FROM user WHERE id = ?', (owner_id,))
+            user_result = cr.fetchone()
+            if not user_result:
+                return {'status': False, 'message': 'User not found'}, 404
+                
+            current_points = user_result[0] if user_result[0] is not None else 0
+            
+            # Insert the post
+            cr.execute('''
+                INSERT INTO post (name, description, department_id, category_id, owner_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                name,
+                description,
+                department_id,
+                category_id,
+                owner_id
+            ))
+            
+            post_id = cr.lastrowid
+            
+            # Handle file attachments if any
+            attachments = []
+            if 'files' in request.files:
+                files = request.files.getlist('files')
+                for file in files:
+                    if file and file.filename and allowed_file(file.filename):
+                        # Generate unique filename
+                        filename = secure_filename(file.filename)
+                        unique_filename = f"{uuid.uuid4()}_{filename}"
+                        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+                        
+                        # Save file
+                        file.save(file_path)
+                        
+                        # Get file size
+                        file_size = os.path.getsize(file_path)
+                        
+                        # Save attachment info to database
+                        cr.execute('''
+                            INSERT INTO attachment (post_id, file_name, file_path, file_type, file_size)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (post_id, filename, unique_filename, file.content_type, file_size))
+                        
+                        attachments.append({
+                            'id': cr.lastrowid,
+                            'file_name': filename,
+                            'file_path': unique_filename,
+                            'file_type': file.content_type,
+                            'file_size': file_size
+                        })
+            
+            # Update user points (add 5 points)
+            new_points = current_points + 5
+            cr.execute('''
+                UPDATE user 
+                SET points = ? 
+                WHERE id = ?
+            ''', (new_points, owner_id))
+            
+            conn.commit()
+            
+            return {
+                'status': True, 
+                'message': 'Post created successfully',
+                'data': {
+                    'post_id': post_id,
+                    'points': new_points,
+                    'attachments': attachments
+                }
+            }
+        except Exception as e:
+            print('Error in create_post:', str(e))
+            return {'status': False, 'message': str(e)}, 400
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print('Error in create_post:', str(e))
+        return {'status': False, 'message': str(e)}, 400
 
 @app.route('/post/<int:id>', methods=['PUT'])
 def update_post(id):
@@ -1747,6 +1827,207 @@ def search_posts():
     finally:
         conn.close()
 
+@app.route('/user/current', methods=['GET'])
+def get_current_user():
+    # Get token from Authorization header
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return {'status': False, 'message': 'No token provided'}, 401
+    
+    token = auth_header.split(' ')[1]
+    
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Get user info from session token
+        cr.execute('''
+            SELECT u.*, s.expired_at
+            FROM user u
+            JOIN session s ON u.id = s.user_id
+            WHERE s.token = ?
+        ''', (token,))
+        
+        user_data = cr.fetchone()
+        
+        if not user_data:
+            return {'status': False, 'message': 'Invalid token'}, 401
+            
+        # Check if session is expired
+        expired_at = datetime.fromisoformat(user_data[-1])
+        if datetime.now() > expired_at:
+            return {'status': False, 'message': 'Session expired'}, 401
+            
+        # Check if user is banned
+        if user_data[10]:  # banned field
+            return {'status': False, 'message': 'User is banned'}, 403
+            
+        # Return user data
+        user = {
+            'id': user_data[0],
+            'name': user_data[1],
+            'bio': user_data[2],
+            'email': user_data[3],
+            'address': user_data[4],
+            'phone': user_data[5],
+            'city': user_data[7],
+            'department': user_data[8],
+            'points': user_data[9],
+            'banned': user_data[10],
+            'profile_picture': user_data[11] if len(user_data) > 11 else None,
+            'admin': user_data[12] if len(user_data) > 12 else False
+        }
+        
+        return {
+            'status': True,
+            'data': user,
+            'message': 'Current user retrieved successfully'
+        }
+        
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/post/<int:post_id>/attachments', methods=['GET'])
+def get_post_attachments(post_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('''
+            SELECT * FROM attachment 
+            WHERE post_id = ?
+            ORDER BY created_at DESC
+        ''', (post_id,))
+        
+        attachments = [{
+            'id': row[0],
+            'post_id': row[1],
+            'file_name': row[2],
+            'file_path': row[3],
+            'file_type': row[4],
+            'file_size': row[5],
+            'created_at': row[6]
+        } for row in cr.fetchall()]
+        
+        return {
+            'status': True,
+            'data': attachments,
+            'message': 'Attachments retrieved successfully'
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/post/<int:post_id>/attachment', methods=['POST'])
+def upload_attachment(post_id):
+    if 'file' not in request.files:
+        return {'status': False, 'message': 'No file provided'}, 400
+        
+    file = request.files['file']
+    
+    if file.filename == '':
+        return {'status': False, 'message': 'No file selected'}, 400
+        
+    if not allowed_file(file.filename):
+        return {'status': False, 'message': 'File type not allowed'}, 400
+    
+    try:
+        # Generate unique filename
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        
+        # Save file
+        file.save(file_path)
+        
+        # Get file size
+        file_size = os.path.getsize(file_path)
+        
+        # Save attachment info to database
+        conn = sqlite3.connect('data.db')
+        cr = conn.cursor()
+        
+        cr.execute('''
+            INSERT INTO attachment (post_id, file_name, file_path, file_type, file_size)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (post_id, filename, unique_filename, file.content_type, file_size))
+        
+        conn.commit()
+        
+        return {
+            'status': True,
+            'message': 'File uploaded successfully',
+            'data': {
+                'id': cr.lastrowid,
+                'post_id': post_id,
+                'file_name': filename,
+                'file_path': unique_filename,
+                'file_type': file.content_type,
+                'file_size': file_size
+            }
+        }
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/attachment/<int:attachment_id>', methods=['DELETE'])
+def delete_attachment(attachment_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        # Get file path before deleting
+        cr.execute('SELECT file_path FROM attachment WHERE id = ?', (attachment_id,))
+        result = cr.fetchone()
+        
+        if not result:
+            return {'status': False, 'message': 'Attachment not found'}, 404
+            
+        file_path = os.path.join(UPLOAD_FOLDER, result[0])
+        
+        # Delete from database
+        cr.execute('DELETE FROM attachment WHERE id = ?', (attachment_id,))
+        conn.commit()
+        
+        # Delete file from filesystem
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        return {'status': True, 'message': 'Attachment deleted successfully'}
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/attachment/<int:attachment_id>', methods=['GET'])
+def download_attachment(attachment_id):
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('SELECT file_name, file_path FROM attachment WHERE id = ?', (attachment_id,))
+        result = cr.fetchone()
+        
+        if not result:
+            return {'status': False, 'message': 'Attachment not found'}, 404
+            
+        file_name, file_path = result
+        
+        return send_from_directory(
+            UPLOAD_FOLDER,
+            file_path,
+            as_attachment=True,
+            download_name=file_name
+        )
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     conn = sqlite3.connect('data.db')
     cur = conn.cursor()
@@ -1766,7 +2047,7 @@ if __name__ == '__main__':
     #cur.execute('DROP TABLE IF EXISTS category')
     #cur.execute('DROP TABLE IF EXISTS department')
     #cur.execute('DROP TABLE IF EXISTS faculty')
-    #cur.execute('DROP TABLE IF EXISTS user')
+    # cur.execute('DROP TABLE IF EXISTS user')
     
     # Create tables if they don't exist
     cur.execute('''
@@ -1782,7 +2063,8 @@ if __name__ == '__main__':
         department TEXT,
         points INTEGER DEFAULT 0,
         banned BOOLEAN DEFAULT FALSE,
-        profile_picture TEXT
+        profile_picture TEXT,
+        admin BOOLEAN DEFAULT FALSE
     )''')
     cur.execute('''
     CREATE TABLE IF NOT EXISTS faculty (
@@ -1901,6 +2183,30 @@ if __name__ == '__main__':
         FOREIGN KEY (comment_id) REFERENCES comment (id),
         FOREIGN KEY (reporter_id) REFERENCES user (id)
     )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS attachment (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id INTEGER NOT NULL,
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_type TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (post_id) REFERENCES post (id) ON DELETE CASCADE
+    )''')
+    
+    # Check if any admin exists
+    cur.execute('SELECT COUNT(*) FROM user WHERE admin = TRUE')
+    admin_count = cur.fetchone()[0]
+    
+    # If no admin exists, create one
+    if admin_count == 0:
+        cur.execute('''
+            INSERT INTO user (
+                name, email, password, admin
+            ) VALUES (?, ?, ?, ?)
+        ''', ('Admin', 'admin@admin.com', 'admin123', True))
+        print("Created default admin user")
     
     conn.commit()
     conn.close()
