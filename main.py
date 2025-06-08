@@ -14,7 +14,7 @@ CORS(app)
 
 # Add upload configuration
 UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'xlsx', 'xls', 'csv', 'doc', 'docx', 'txt'}
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -726,8 +726,44 @@ def get_posts():
         'profile_picture': row[9],
         'category_name': row[10],
         'department_name': row[11],
-        'comment_count': row[12]
+        'comment_count': row[12],
+        'attachments': []  # Initialize empty attachments array
     } for row in cr.fetchall()]
+    
+    # If we have posts, get their attachments
+    if posts:
+        # Get all post IDs
+        post_ids = [post['id'] for post in posts]
+        placeholders = ','.join(['?' for _ in post_ids])
+        
+        # Get all attachments for these posts
+        attachment_query = f'''
+            SELECT post_id, id, file_name, file_path, file_type, file_size, created_at
+            FROM attachment 
+            WHERE post_id IN ({placeholders})
+            ORDER BY post_id, created_at DESC
+        '''
+        cr.execute(attachment_query, post_ids)
+        
+        # Group attachments by post_id
+        attachments_by_post = {}
+        for attachment_row in cr.fetchall():
+            post_id = attachment_row[0]
+            if post_id not in attachments_by_post:
+                attachments_by_post[post_id] = []
+            
+            attachments_by_post[post_id].append({
+                'id': attachment_row[1],
+                'file_name': attachment_row[2],
+                'file_path': attachment_row[3],
+                'file_type': attachment_row[4],
+                'file_size': attachment_row[5],
+                'created_at': attachment_row[6]
+            })
+        
+        # Add attachments to each post
+        for post in posts:
+            post['attachments'] = attachments_by_post.get(post['id'], [])
     
     response = {
         'status': True,
@@ -2022,6 +2058,77 @@ def download_attachment(attachment_id):
             file_path,
             as_attachment=True,
             download_name=file_name
+        )
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+    finally:
+        conn.close()
+
+@app.route('/files/<path:filename>')
+def serve_file(filename):
+    """
+    Serve files directly from uploads directory for viewing in browser
+    """
+    try:
+        return send_from_directory(UPLOAD_FOLDER, filename)
+    except FileNotFoundError:
+        return {'status': False, 'message': 'File not found'}, 404
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    """
+    Download files directly from uploads directory
+    """
+    try:
+        # Get original filename from database if possible
+        conn = sqlite3.connect('data.db')
+        cr = conn.cursor()
+        
+        cr.execute('SELECT file_name FROM attachment WHERE file_path = ?', (filename,))
+        result = cr.fetchone()
+        
+        if result:
+            original_name = result[0]
+        else:
+            # If not found in database, use the filename as is
+            original_name = filename
+            
+        conn.close()
+        
+        return send_from_directory(
+            UPLOAD_FOLDER,
+            filename,
+            as_attachment=True,
+            download_name=original_name
+        )
+    except FileNotFoundError:
+        return {'status': False, 'message': 'File not found'}, 404
+    except Exception as e:
+        return {'status': False, 'message': str(e)}, 400
+
+@app.route('/attachment/<int:attachment_id>/view', methods=['GET'])
+def view_attachment(attachment_id):
+    """
+    View attachment in browser (not as download)
+    """
+    conn = sqlite3.connect('data.db')
+    cr = conn.cursor()
+    
+    try:
+        cr.execute('SELECT file_name, file_path FROM attachment WHERE id = ?', (attachment_id,))
+        result = cr.fetchone()
+        
+        if not result:
+            return {'status': False, 'message': 'Attachment not found'}, 404
+            
+        file_name, file_path = result
+        
+        return send_from_directory(
+            UPLOAD_FOLDER,
+            file_path,
+            as_attachment=False  # View in browser instead of download
         )
     except Exception as e:
         return {'status': False, 'message': str(e)}, 400
