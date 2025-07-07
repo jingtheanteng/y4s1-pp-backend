@@ -155,6 +155,7 @@ def login_users():
             'address': queried_data[4],
             'phone': queried_data[5],
             'banned': queried_data[10],
+            'profile_picture': queried_data[11] if len(queried_data) > 11 else None,
             'admin': queried_data[12] if len(queried_data) > 12 else False  # Add admin field
         }
         
